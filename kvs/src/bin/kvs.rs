@@ -4,6 +4,7 @@ use std::process::exit;
 use clap::Arg;
 use clap::Command;
 use kvs::KvStore;
+use kvs::KvsEngine;
 fn main() {
     let c = Command::new("kvs")
         .version(env!("CARGO_PKG_VERSION"))

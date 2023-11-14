@@ -8,6 +8,69 @@ use std::{
     path,
 };
 
+pub trait KvsEngine {
+    fn set(&mut self, key: String, value: String) -> Result<()>;
+    fn get(&mut self, key: String) -> Result<Option<String>>;
+    fn remove(&mut self, key: String) -> Result<()>;
+}
+
+pub struct SledKvsEngine {
+    db: sled::Db,
+}
+
+impl SledKvsEngine {
+    pub fn open(p: &path::Path) -> Result<Self> {
+        let db = sled::open(p);
+        match db {
+            Ok(db) => Ok(SledKvsEngine { db }),
+            Err(e) => Err(Box::new(e)),
+        }
+    }
+}
+
+impl KvsEngine for SledKvsEngine {
+    fn set(&mut self, key: String, value: String) -> Result<()> {
+        // println!("set key: {} value: {}",key,value);
+        let x = self.db.insert(key, value.as_bytes());
+        self.db.flush().unwrap();
+        match x {
+            Ok(_) => Ok(()),
+            Err(e) => Err(Box::new(e)),
+        }
+    }
+
+    fn get(&mut self, key: String) -> Result<Option<String>> {
+        // println!("get key: {}",key);
+        let x = self.db.get(key);
+        match x {
+            Ok(v) => match v {
+                Some(value) => {
+                    let v2 = String::from_utf8(value.to_vec());
+                    match v2 {
+                        Ok(v3) => Ok(Some(v3)),
+                        Err(e) => Err(Box::new(e)),
+                    }
+                }
+                None => Ok(None),
+            },
+            Err(e) => Err(Box::new(e)),
+        }
+    }
+
+    fn remove(&mut self, key: String) -> Result<()> {
+        // println!("rm key: {}",key);
+        let x = self.db.remove(key);
+        self.db.flush().unwrap();
+        match x {
+            Ok(v) => match v {
+                Some(_) => Ok(()),
+                None => Err("Key not found".into()),
+            },
+            Err(e) => Err(Box::new(e)),
+        }
+    }
+}
+
 pub struct KvStore {
     // key -> log position, content length
     data: HashMap<String, (u64, usize)>,
@@ -24,7 +87,8 @@ pub struct KvStore {
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 #[derive(Serialize, Deserialize, Debug)]
-enum Command {
+pub enum Command {
+    Get(String),
     Rm(String),
     Set(String, String),
 }
@@ -33,9 +97,8 @@ enum Command {
 const DELIMITER: u8 = b'#';
 const COMPACTION_RATIO: usize = 3;
 const COMPACTION_KEYS: usize = 100;
-const LOGFILENAM: &str = "kvs.log";
+pub const LOGFILENAM: &str = "kvs.log";
 
-// 打开一个已有的之前写入过的日志文件，读需要重建内存表，写需要正确记录新的起始位置
 impl KvStore {
     pub fn open(p: &path::Path) -> Result<Self> {
         let wf: fs::File = fs::OpenOptions::new()
@@ -76,56 +139,6 @@ impl KvStore {
             log_keys,
             dir: p.to_str().unwrap().to_owned(),
         })
-    }
-    pub fn get(&mut self, key: String) -> Result<Option<String>> {
-        match self.data.get(&key) {
-            Some(v) => {
-                // println!("debug get key {}", key);
-                let mut buf: Vec<u8> = vec![0; v.1];
-                self.rlog.read_exact_at(&mut buf, v.0)?;
-                // rm delimiter
-                buf.pop();
-                let c: Command = serde_json::from_slice(&buf)?;
-                // println!("debug store key {:#?},pos {}, len{}", c, v.0, v.1);
-
-                if let Command::Set(k, value) = c {
-                    assert_eq!(key, k);
-                    Ok(Some(value))
-                } else {
-                    Ok(None)
-                }
-            }
-            None => Ok(None),
-        }
-    }
-    pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        let sc = Command::Set(key.clone(), value);
-        let mut s = serde_json::to_string(&sc)?;
-        s.push(char::from_u32(DELIMITER.into()).unwrap());
-        let b = s.as_bytes();
-        let len = b.len();
-        self.wlog.write_all(b)?;
-        let pos = self.wlog.stream_position()?;
-        self.data
-            .insert(key, (pos - u64::try_from(len).unwrap(), len));
-        self.log_keys += 1;
-        self.compaction();
-        Ok(())
-    }
-    pub fn remove(&mut self, key: String) -> Result<()> {
-        match self.data.remove(&key) {
-            Some(_) => {
-                let sc = Command::Rm(key.clone());
-                let mut s = serde_json::to_string(&sc)?;
-                s.push(char::from_u32(DELIMITER.into()).unwrap());
-                let b = s.as_bytes();
-                self.wlog.write_all(b)?;
-                self.log_keys += 1;
-                self.compaction();
-                Ok(())
-            }
-            None => Err("Key not found".into()),
-        }
     }
 
     // 新开辟一个文件写入
@@ -233,28 +246,82 @@ impl KvStore {
     }
 }
 
+// 打开一个已有的之前写入过的日志文件，读需要重建内存表，写需要正确记录新的起始位置
+impl KvsEngine for KvStore {
+    fn get(&mut self, key: String) -> Result<Option<String>> {
+        match self.data.get(&key) {
+            Some(v) => {
+                // println!("debug get key {}", key);
+                let mut buf: Vec<u8> = vec![0; v.1];
+                self.rlog.read_exact_at(&mut buf, v.0)?;
+                // rm delimiter
+                buf.pop();
+                let c: Command = serde_json::from_slice(&buf)?;
+                // println!("debug store key {:#?},pos {}, len{}", c, v.0, v.1);
+
+                if let Command::Set(k, value) = c {
+                    assert_eq!(key, k);
+                    Ok(Some(value))
+                } else {
+                    Ok(None)
+                }
+            }
+            None => Ok(None),
+        }
+    }
+    fn set(&mut self, key: String, value: String) -> Result<()> {
+        let sc = Command::Set(key.clone(), value);
+        let mut s = serde_json::to_string(&sc)?;
+        s.push(char::from_u32(DELIMITER.into()).unwrap());
+        let b = s.as_bytes();
+        let len = b.len();
+        self.wlog.write_all(b)?;
+        let pos = self.wlog.stream_position()?;
+        self.data
+            .insert(key, (pos - u64::try_from(len).unwrap(), len));
+        self.log_keys += 1;
+        self.compaction();
+        Ok(())
+    }
+    fn remove(&mut self, key: String) -> Result<()> {
+        match self.data.remove(&key) {
+            Some(_) => {
+                let sc = Command::Rm(key.clone());
+                let mut s = serde_json::to_string(&sc)?;
+                s.push(char::from_u32(DELIMITER.into()).unwrap());
+                let b = s.as_bytes();
+                self.wlog.write_all(b)?;
+                self.log_keys += 1;
+                self.compaction();
+                Ok(())
+            }
+            None => Err("Key not found".into()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // use super::*;
     use core::time;
     use std::{
-        fs,
+        env, fs,
         io::{BufRead, BufReader, Read, Seek, Write},
         thread,
     };
 
     use tempfile::TempDir;
 
-    // #[test]
-    // fn write3(){
-    //     let temp_dir = TempDir::new().expect("unable to create temporary working directory");
-    //     let mut store = KvStore::open(temp_dir.path()).unwrap();
-    //     for key_id in 0..1000 {
-    //         let key = format!("key{}", key_id);
-    //         let value = format!("{}", iter);
-    //         store.set(key, value)?;
-    //     }
-    // }
+    use crate::{KvsEngine, SledKvsEngine};
+
+    #[test]
+    fn kvoperator() {
+        let temp_dir = env::current_dir().unwrap();
+        let mut store = SledKvsEngine::open(temp_dir.as_path()).unwrap();
+        let a = store.get("key".to_owned());
+        println!("{:?}", a);
+        store.set("key".to_owned(), "value".to_owned()).unwrap();
+    }
 
     #[test]
     fn tmp_path() {
@@ -322,31 +389,31 @@ mod tests {
         }
     }
 
-    #[test]
-    fn write2c() {
-        let mut f = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .append(true)
-            .create(true)
-            .open("/tmp/2")
-            .unwrap();
-        println!("pos1 {}", f.stream_position().unwrap());
-        f.write_all(b"zzzxxxdfdf").unwrap();
-        println!("pos1.1 {}", f.stream_position().unwrap());
+    // #[test]
+    // fn write2c() {
+    //     let mut f = fs::OpenOptions::new()
+    //         .read(true)
+    //         .write(true)
+    //         .append(true)
+    //         .create(true)
+    //         .open("/tmp/2")
+    //         .unwrap();
+    //     println!("pos1 {}", f.stream_position().unwrap());
+    //     f.write_all(b"zzzxxxdfdf").unwrap();
+    //     println!("pos1.1 {}", f.stream_position().unwrap());
 
-        let mut buf = String::new();
-        f.rewind().unwrap();
-        f.read_to_string(&mut buf).unwrap();
-        println!("read {}", buf);
-        println!("pos {}", f.stream_position().unwrap());
+    //     let mut buf = String::new();
+    //     f.rewind().unwrap();
+    //     f.read_to_string(&mut buf).unwrap();
+    //     println!("read {}", buf);
+    //     println!("pos {}", f.stream_position().unwrap());
 
-        f.rewind().unwrap();
-        println!("pos2 {}", f.stream_position().unwrap());
+    //     f.rewind().unwrap();
+    //     println!("pos2 {}", f.stream_position().unwrap());
 
-        // f.set_len(40).unwrap();
-        // f.write_all_at(b"buffer", 20);
-        f.write_all(b"begin").unwrap();
-        println!("pos3 {}", f.stream_position().unwrap());
-    }
+    //     // f.set_len(40).unwrap();
+    //     // f.write_all_at(b"buffer", 20);
+    //     f.write_all(b"begin").unwrap();
+    //     println!("pos3 {}", f.stream_position().unwrap());
+    // }
 }

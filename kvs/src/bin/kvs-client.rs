@@ -28,7 +28,8 @@
 
 use std::{
     io::{BufRead, BufReader, Write},
-    net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream}, process::exit,
+    net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream},
+    process::exit,
 };
 
 use clap::{Parser, Subcommand};

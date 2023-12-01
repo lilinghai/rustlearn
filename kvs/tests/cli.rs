@@ -3,8 +3,8 @@ use predicates::str::{contains, is_empty};
 use std::fs::{self, File};
 use std::process::Command;
 use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
-use std::{path, thread};
 use tempfile::TempDir;
 
 // `kvs-client` with no args should exit with a non-zero code.
@@ -215,8 +215,6 @@ fn cli_wrong_engine() {
 fn cli_access_server(engine: &str, addr: &str) {
     let (sender, receiver) = mpsc::sync_channel(0);
     let temp_dir = TempDir::new().unwrap();
-    // debug
-    // let temp_dir = path::Path::new("/tmp/2");
     let mut server = Command::cargo_bin("kvs-server").unwrap();
     let mut child = server
         .args(&["--engine", engine, "--addr", addr])
@@ -288,14 +286,6 @@ fn cli_access_server(engine: &str, addr: &str) {
         .current_dir(&temp_dir)
         .assert()
         .success();
-
-    // Command::cargo_bin("kvs-client")
-    //     .unwrap()
-    //     .args(&["get", "key2", "--addr", addr])
-    //     .current_dir(&temp_dir)
-    //     .assert()
-    //     .success()
-    //     .stdout(contains("value3"));
 
     sender.send(()).unwrap();
     handle.join().unwrap();

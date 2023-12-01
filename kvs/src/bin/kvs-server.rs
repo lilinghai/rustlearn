@@ -18,6 +18,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
     process::exit,
+    sync::Arc,
 };
 
 use slog::{error, info};
@@ -27,7 +28,10 @@ use sloggers::Build;
 
 use clap::{Parser, ValueEnum};
 
-use kvs::{Command, KvStore, KvsEngine, SledKvsEngine, LOGFILENAM};
+use kvs::{
+    thread_pool::{NaiveThreadPool, ThreadPool},
+    Command, KvStore, KvsEngine, SledKvsEngine, LOGFILENAM,
+};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -63,7 +67,7 @@ fn main() {
 
     let binding = env::current_dir().unwrap();
     let d = binding.as_path();
-    let mut store: Box<dyn KvsEngine>;
+    let store: Arc<dyn KvsEngine + Sync + Send>;
     let b = d.join("db");
     let sledkv = b.exists();
     let b2 = d.join(LOGFILENAM);
@@ -76,64 +80,69 @@ fn main() {
                     error!(logger, "store engine is wrong");
                     exit(1);
                 }
-                store = Box::new(KvStore::open(d).unwrap())
+                store = Arc::new(KvStore::open(d).unwrap())
             }
             Engine::Sled => {
                 if kvskv {
                     error!(logger, "store engine is wrong");
                     exit(1);
                 }
-                store = Box::new(SledKvsEngine::open(d).unwrap())
+                store = Arc::new(SledKvsEngine::open(d).unwrap())
             }
         },
         None => {
             if sledkv {
-                store = Box::new(SledKvsEngine::open(d).unwrap())
+                store = Arc::new(SledKvsEngine::open(d).unwrap())
             } else {
-                store = Box::new(KvStore::open(d).unwrap())
+                store = Arc::new(KvStore::open(d).unwrap())
             }
         }
     }
     let listener = TcpListener::bind(cli.addr).unwrap();
     info!(logger, "server is started");
+    let tp = NaiveThreadPool::new(10).unwrap();
     for income in listener.incoming() {
         match income {
             Ok(mut stream) => {
-                let mut s = String::new();
-                let mut bf = BufReader::new(&stream);
-                bf.read_line(&mut s).unwrap();
-                println!("read data {}", s);
-                // parse s to rm/get/set
-                let command: Command = serde_json::from_str(&s).unwrap();
-                match command {
-                    Command::Get(key) => {
-                        let r = store.get(key).unwrap();
-                        match r {
-                            Some(rs) => {
-                                stream.write((rs + "\n").as_bytes()).unwrap();
-                            }
-                            None => {
-                                stream.write(b"Key not found\n").unwrap();
+                // 通过原子引用计数在多线程共享数据
+                let store_clone=store.clone();
+                tp.spawn(move || {
+                    let mut s = String::new();
+                    let mut bf = BufReader::new(&stream);
+                    bf.read_line(&mut s).unwrap();
+                    println!("read data {}", s);
+                    // parse s to rm/get/set
+                    let command: Command = serde_json::from_str(&s).unwrap();
+                    match command {
+                        Command::Get(key) => {
+                            let r = store_clone.get(key).unwrap();
+                            match r {
+                                Some(rs) => {
+                                    stream.write((rs + "\n").as_bytes()).unwrap();
+                                }
+                                None => {
+                                    stream.write(b"Key not found\n").unwrap();
+                                }
                             }
                         }
-                    }
-                    Command::Rm(key) => {
-                        let r = store.remove(key);
-                        match r {
-                            Ok(_) => {
+                        Command::Rm(key) => {
+                            let r = store_clone.remove(key);
+                            match r {
+                                Ok(_) => {
+                                    stream.write(b"Success\n").unwrap();
+                                }
+                                Err(e) => {
+                                    stream.write((e.to_string() + "\n").as_bytes()).unwrap();
+                                }
+                            }
+                        }
+                        Command::Set(key, value) => {
+                                store_clone.set(key, value).unwrap();
                                 stream.write(b"Success\n").unwrap();
-                            }
-                            Err(e) => {
-                                stream.write((e.to_string() + "\n").as_bytes()).unwrap();
-                            }
                         }
+                        _ => unreachable!(), // Either no subcommand or one not tested for...
                     }
-                    Command::Set(key, value) => {
-                        store.set(key, value).unwrap();
-                        stream.write(b"Success\n").unwrap();
-                    }
-                    _ => unreachable!(), // Either no subcommand or one not tested for...
-                }
+                });
             }
             Err(_) => todo!(),
         }

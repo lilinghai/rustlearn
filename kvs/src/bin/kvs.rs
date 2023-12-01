@@ -21,7 +21,7 @@ fn main() {
 
     let binding = env::current_dir().unwrap();
     let d = binding.as_path();
-    let mut store = KvStore::open(d).unwrap();
+    let store = KvStore::open(d).unwrap();
 
     match c.subcommand() {
         Some(("get", sub_m)) => {

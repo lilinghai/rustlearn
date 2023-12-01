@@ -19,6 +19,8 @@ sloggers = "2.1.2"
 
 [dev-dependencies]
 assert_cmd = "2.0.12"
+crossbeam-utils = "0.8.16"
+panic-control = "0.1.4"
 predicates = "3.0.3"
 tempfile = "3.0.7"
 walkdir = "2.2.7"
